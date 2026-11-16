@@ -146,11 +146,18 @@ def main():
 
 
 def plot_sweep(results, out_path):
+    # "full" isn't numeric, so plot against categorical positions and label
+    # the ticks with the real budget values instead of handing strings
+    # straight to matplotlib's numeric axis.
     order = sorted(results["budget"].unique(), key=lambda b: (b == "full", 0 if b == "full" else int(b)))
+    x_pos = {b: i for i, b in enumerate(order)}
+
     fig, ax = plt.subplots(figsize=(7, 5))
     for pretrain, group in results.groupby("pretrain"):
-        group = group.set_index("budget").loc[order].reset_index()
-        ax.plot(group["budget"], group["macro_f1"], marker="o", label=pretrain)
+        group = group.sort_values("budget", key=lambda col: col.map(x_pos))
+        ax.plot([x_pos[b] for b in group["budget"]], group["macro_f1"], marker="o", label=pretrain)
+    ax.set_xticks(range(len(order)))
+    ax.set_xticklabels(order)
     ax.set_xlabel("Training examples per class")
     ax.set_ylabel("Test macro-F1")
     ax.set_title("Linear-probe performance vs. label budget")
