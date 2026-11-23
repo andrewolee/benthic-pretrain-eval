@@ -32,6 +32,17 @@ python -m src.train --pretrain benthicnet
 python -m src.train --pretrain random   # control
 
 python -m src.compare runs/imagenet_seed42 runs/benthicnet_seed42 runs/random_seed42
+
+# Label-budget sweep (frozen probe)
+python -m src.sweep --pretrains imagenet,benthicnet,random --budgets 5,10,20,50,full
+
+# Replicate the BenthicNet paper's exact probe recipe (100 epochs, warmup-cosine LR)
+python -m src.train --pretrain imagenet --lr-schedule warmup-cosine --epochs 100
+python -m src.train --pretrain benthicnet --lr-schedule warmup-cosine --epochs 100
+
+# Fine-tuning (unfreeze the backbone) at low budgets
+python -m src.sweep --pretrains imagenet,benthicnet --budgets 5,10,full \
+  --fine-tune --lr-schedule warmup-cosine --epochs 100
 ```
 
 ## Notes
@@ -160,14 +171,98 @@ may be too conservative to fully converge in 100 epochs. So this recipe
 is more apples-to-apples for *comparing* the two backbones, but may not
 be *optimal* for either at our data scale.
 
-### Natural next step: fine-tuning
+### Follow-up: is the narrower gap about LR schedule shape, or just LR magnitude?
 
-The strongest remaining test of BenthicNet's claimed advantage is
-fine-tuning (unfreezing the backbone) specifically at **low** label
-budgets (5-10/class) -- that's the regime where (a) ImageNet can't lean on
-having lots of data to adapt with, and (b) fine-tuning removes ImageNet's
-"already linearly organized" edge from the frozen-probe comparison. If
-BenthicNet still loses there, that's a fairly strong signal the
-domain-specific pretraining isn't paying off for this dataset even in its
-best-case scenario. `--fine-tune` is implemented in `src/train.py`;
-not yet run as of this writing.
+Swept the warmup-cosine peak LR at full budget to check (rented RunPod RTX
+3090, 100 epochs each):
+
+| Peak LR | ImageNet | BenthicNet | Gap |
+|---|---|---|---|
+| `3e-5` (paper's exact value) | 0.557 | 0.513 | 0.044 |
+| `1e-4` | 0.743 | 0.621 | 0.122 |
+| `3e-4` | 0.796 | 0.679 | 0.117 |
+| flat `1e-3` (original) | 0.827 | 0.692 | 0.135 |
+
+The gap re-widens almost monotonically as peak LR increases, landing back
+near the original 0.135 by just `1e-4` -- nowhere close to staying at the
+paper's exact value. So the earlier "3x narrower gap" wasn't really about
+the warmup-cosine *shape* being a fairer comparison -- it was mostly that
+the paper's specific peak LR (`3e-5`) is conservative enough to leave both
+heads undertrained on our much smaller dataset, which shrinks the measured
+gap as a side effect rather than revealing a more accurate one.
+
+### Fine-tuning results
+
+Ran `--fine-tune` (unfreeze the backbone) at low budgets + full, using the
+paper's warmup-cosine recipe (fine-tune stage: flat LR = peak_lr * 0.1,
+per the paper's "one tenth the learning rate used for the linear probe"),
+on the same rented RTX 3090:
+
+| Budget/class | ImageNet (fine-tuned) | BenthicNet (fine-tuned) | BenthicNet advantage |
+|---|---|---|---|
+| 5    | 0.082 | 0.444 | ~5.4x |
+| 10   | 0.205 | 0.604 | ~2.9x |
+| full | 0.738 | 0.819 | ~1.11x |
+
+**BenthicNet wins at every budget under fine-tuning, with the advantage
+shrinking cleanly as the budget grows** -- the opposite of every
+frozen-probe result above, and a close match to the paper's own framing
+(advantage concentrated in smaller/low-label tasks).
+
+Caveat on the low-budget ImageNet numbers: this is a *single-stage*
+fine-tune (backbone unfrozen from the start, head randomly initialized),
+not the paper's two-stage recipe (probe first, then unfreeze). Jointly
+training a from-scratch head and the full backbone on just 125-250 images
+can be unstable -- plausibly why ImageNet's fine-tuned score at budget=5
+(0.082) is even lower than its own frozen-probe score at the same budget
+(0.542). BenthicNet tolerates this better, which may itself reflect its
+SSL pretraining having seen a more diverse range of benthic imagery. Not
+independently verified; a two-stage fine-tune would be a cleaner test of
+this specific caveat.
+
+**But does this mean BenthicNet is the better choice overall? No --
+compare fine-tuned BenthicNet to *probed* ImageNet, not fine-tuned
+ImageNet:**
+
+| Budget/class | ImageNet (frozen probe, best) | BenthicNet (fine-tuned, best) | Winner |
+|---|---|---|---|
+| 5    | 0.542 | 0.444 | ImageNet, by 0.098 |
+| 10   | 0.630 | 0.604 | ImageNet, by 0.026 |
+| full | 0.827 | 0.819 | ImageNet, by 0.008 (~tied) |
+
+**ImageNet's cheap frozen probe still wins outright at every budget**,
+even against BenthicNet's far more expensive fine-tuned result. The
+honest summary of the fine-tuning experiment isn't "BenthicNet wins" --
+it's "*if* you're going to fine-tune, BenthicNet is the better backbone
+to fine-tune, but fine-tuning anything doesn't beat just doing a cheap
+ImageNet probe in the first place."
+
+### Would more data (e.g. the full Kelp Quest/Zooniverse dataset) help BenthicNet?
+
+Likely not -- if anything, probably the opposite. BenthicNet's relative
+advantage shrinks monotonically as the budget grows in every comparison
+above (5.4x -> 2.9x -> 1.11x under fine-tuning). The paper's own two
+benchmark datasets show the same pattern: roughly tied on their large
+(43K-image) dataset, BenthicNet winning decisively on their small
+(2.7K-image) one. Seattle Aquarium's Kelp Quest/Zooniverse pipeline has
+accumulated ~50K+ verified classifications -- more than 10x our current
+training set. Scaling up to that would likely push this comparison
+further toward the "large dataset" regime, where the paper's own results
+(and ours) suggest ImageNet's position holds or improves, not BenthicNet's.
+(Caveat: this assumes the larger set is "more of the same" rather than a
+meaningfully different/harder task.)
+
+### Overall conclusion
+
+Across every configuration tested -- frozen probe, fine-tuned, five label
+budgets, four LR schedules -- **ImageNet-pretrained features are either
+the best choice outright, or close enough that BenthicNet's
+domain-specific SSL pretraining doesn't clearly earn its extra cost on
+this dataset.** BenthicNet's pretraining does show a real, measurable
+benefit in one specific, narrower sense: *given that you're fine-tuning*,
+it's a better starting point than ImageNet, especially at low label
+counts. But that's a different and much narrower claim than "BenthicNet
+pretraining helps this task" -- and for Seattle Aquarium's actual
+pipeline, which uses a cheap ImageNet-pretrained backbone via
+CoralNet-Toolbox, this project found no evidence that switching to
+BenthicNet would improve results enough to justify the switch.
