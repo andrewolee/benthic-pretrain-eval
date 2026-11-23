@@ -32,7 +32,7 @@ def make_transform(mean, std):
 
 def run_epoch(model, loader, device, optimizer=None, class_weights=None):
     training = optimizer is not None
-    model.head.train(training)
+    model.train(training)
 
     all_preds, all_targets = [], []
     total_loss = 0.0
@@ -69,7 +69,9 @@ def main():
     )
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=1e-3, help="head learning rate")
+    parser.add_argument("--fine-tune", action="store_true", help="unfreeze the backbone instead of linear-probing it")
+    parser.add_argument("--backbone-lr", type=float, default=1e-4, help="backbone learning rate when --fine-tune is set")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--min-per-class", type=int, default=20)
     parser.add_argument("--class-weighted", action="store_true", help="weight loss inverse to class frequency")
@@ -99,8 +101,16 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
-    model = LinearProbe(backbone, feature_dim, len(classes)).to(device)
-    optimizer = torch.optim.Adam(model.head.parameters(), lr=args.lr)
+    model = LinearProbe(backbone, feature_dim, len(classes), freeze_backbone=not args.fine_tune).to(device)
+    if args.fine_tune:
+        optimizer = torch.optim.Adam(
+            [
+                {"params": model.backbone.parameters(), "lr": args.backbone_lr},
+                {"params": model.head.parameters(), "lr": args.lr},
+            ]
+        )
+    else:
+        optimizer = torch.optim.Adam(model.head.parameters(), lr=args.lr)
 
     class_weights = None
     if args.class_weighted:
@@ -109,7 +119,8 @@ def main():
         weights = weights / weights.sum() * len(classes)
         class_weights = torch.tensor(weights, dtype=torch.float32, device=device)
 
-    run_name = f"{args.pretrain}_seed{args.seed}"
+    mode = "ft" if args.fine_tune else "probe"
+    run_name = f"{args.pretrain}_{mode}_seed{args.seed}"
     run_dir = os.path.join(args.output_dir, run_name)
     os.makedirs(run_dir, exist_ok=True)
 

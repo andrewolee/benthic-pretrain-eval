@@ -67,17 +67,26 @@ def build_backbone(pretrain, benthicnet_ckpt=None):
 
 
 class LinearProbe(nn.Module):
-    """Frozen backbone + trainable linear head."""
+    """Backbone (frozen, or unfrozen for fine-tuning) + trainable linear head."""
 
-    def __init__(self, backbone, feature_dim, num_classes):
+    def __init__(self, backbone, feature_dim, num_classes, freeze_backbone=True):
         super().__init__()
         self.backbone = backbone
+        self.freeze_backbone = freeze_backbone
         for param in self.backbone.parameters():
-            param.requires_grad_(False)
+            param.requires_grad_(not freeze_backbone)
         self.head = nn.Linear(feature_dim, num_classes)
 
+    def train(self, mode=True):
+        super().train(mode)
+        if self.freeze_backbone:
+            self.backbone.eval()  # keep frozen backbone's batchnorm/dropout in eval regardless
+        return self
+
     def forward(self, x):
-        self.backbone.eval()
-        with torch.no_grad():
+        if self.freeze_backbone:
+            with torch.no_grad():
+                features = self.backbone(x)
+        else:
             features = self.backbone(x)
         return self.head(features)
