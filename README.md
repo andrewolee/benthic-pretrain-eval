@@ -119,6 +119,47 @@ BenthicNet's SSL-pretrained encoder would help, at least under a frozen
 linear probe. That's a useful, legitimate finding on its own, independent
 of whether a future fine-tuning experiment changes the picture.
 
+### Methodology check: replicating BenthicNet's exact probe recipe
+
+Read the BenthicNet paper (Lowe, Misiuk, Xu et al. 2024/2025, Sci Data)
+directly rather than guessing at their eval protocol. Their actual
+linear-probe recipe: 100 epochs, LR linearly warmed up from `3e-6` to
+`3e-5` over 10 epochs, then cosine-annealed back down to `3e-6` -- quite
+different from the flat `lr=1e-3`/30-epoch probe we'd been running.
+Implemented as `--lr-schedule warmup-cosine` in `src/train.py`.
+
+Their own results (Table 5/6 of the paper) were also informative: on a
+large dataset (43K train images) ImageNet and BenthicNet tie in linear
+probe; on a smaller, more specific one (German Bank 2010, 2.7K train
+images) BenthicNet wins the linear probe decisively (43.2 vs 30.0 F1).
+Their explanation: BenthicNet's SSL pretraining advantage shows up on
+*smaller, more specific* classification tasks, not as a function of
+"fine-tune vs. frozen" per se. Our CCR dataset (3,937 images, 25 classes)
+is in that "smaller/specific" regime by their own framing, which raised
+the question of why we weren't seeing anything close to their result.
+
+Re-ran the full-budget comparison with their exact recipe (on a rented
+RunPod RTX 3090, 100 epochs each):
+
+| Recipe | ImageNet | BenthicNet | Gap |
+|---|---|---|---|
+| Our original (flat `lr=1e-3`, 30 epochs) | 0.827 | 0.692 | 0.135 |
+| Paper's exact recipe (warmup-cosine, 100 epochs) | 0.557 | 0.513 | 0.044 |
+
+**The gap shrank ~3x** once the LR schedule matched the paper's. This
+supports the hypothesis that a meaningful chunk of ImageNet's earlier
+lead was an artifact of our aggressive flat learning rate suiting
+ImageNet's features better, not a true reflection of pretraining quality
+-- ImageNet still edges ahead, but it's close now, not a blowout.
+
+Caveat: both absolute scores dropped substantially under the paper's
+recipe (ImageNet: 0.827 -> 0.557). Their LR schedule (peak `3e-5`) was
+likely tuned for their much larger datasets (43K / 2.7K images); on our
+smaller dataset (2,164 training images, ~34 batches/epoch) that peak LR
+may be too conservative to fully converge in 100 epochs. So this recipe
+is more apples-to-apples for *comparing* the two backbones, but may not
+be *optimal* for either at our data scale.
+
 ### Natural next step: fine-tuning
 
 The strongest remaining test of BenthicNet's claimed advantage is
@@ -128,4 +169,5 @@ having lots of data to adapt with, and (b) fine-tuning removes ImageNet's
 "already linearly organized" edge from the frozen-probe comparison. If
 BenthicNet still loses there, that's a fairly strong signal the
 domain-specific pretraining isn't paying off for this dataset even in its
-best-case scenario. Not yet implemented/run as of this writing.
+best-case scenario. `--fine-tune` is implemented in `src/train.py`;
+not yet run as of this writing.
