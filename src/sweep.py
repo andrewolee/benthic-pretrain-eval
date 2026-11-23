@@ -24,11 +24,11 @@ from src.train import make_transform, run_epoch, warmup_cosine_lr
 
 
 def subsample_per_class(df, n, seed):
-    return (
-        df.groupby("label", group_keys=False)
-        .apply(lambda g: g.sample(min(len(g), n), random_state=seed))
-        .reset_index(drop=True)
-    )
+    # Avoid groupby().apply(): on some pandas versions it silently drops the
+    # grouping column from the result, breaking downstream code that expects
+    # "label" to still be present.
+    parts = [group.sample(min(len(group), n), random_state=seed) for _, group in df.groupby("label")]
+    return pd.concat(parts).reset_index(drop=True)
 
 
 def parse_budgets(spec):
